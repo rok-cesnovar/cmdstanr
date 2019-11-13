@@ -85,26 +85,8 @@ cmdstan_model <- function(stan_file, compile = TRUE, ...) {
 #' @description A `CmdStanModel` object is an [R6][R6::R6] object returned by
 #'   the [cmdstan_model()] function. The object stores the path to a Stan
 #'   program as well as a path to a compiled executable once created, and
-#'   provides methods for fitting the model. See **Details** section for
+#'   provides methods for fitting the model. See the **Methods** section for
 #'   available methods.
-#'
-#' @details
-#' `CmdStanModel` objects have the following associated methods:
-#'
-#' \tabular{ll}{
-#'  **Method** \tab **Description** \cr
-#'  code \tab Return Stan program as a string. \cr
-#'  print \tab Print readable version of Stan program. \cr
-#'  stan_file \tab Return the file path to the Stan program. \cr
-#'  exe_file \tab Return the file path to the compiled executable once compiled. \cr
-#'  [compile][model-method-compile] \tab Compile Stan program. \cr
-#'  [sample][model-method-sample]
-#'    \tab Run CmdStan's `"sample"` method, return [`CmdStanMCMC`] object. \cr
-#'  [optimize][model-method-optimize]
-#'    \tab Run CmdStan's `"optimize"` method, return [`CmdStanMLE`] object. \cr
-#'  [variational][model-method-variational]
-#'    \tab Run CmdStan's `"variational"` method, return [`CmdStanVB`] object. \cr
-#' }
 #'
 #' @template seealso-docs
 #' @inherit cmdstan_model examples
@@ -118,6 +100,12 @@ CmdStanModel <- R6::R6Class(
     exe_file_ = character()
   ),
   public = list(
+
+    #' @description
+    #' Create a new `CmdStanModel` object. This method never needs to be called
+    #' directly by the user (use [cmdstan_model()] instead).
+    #' @param stan_file,compile,... Same as for [cmdstan_model()].
+    #' @return A new `CmdStanModel` object.
     initialize = function(stan_file, compile, ...) {
       checkmate::assert_file_exists(stan_file, access = "r", extension = "stan")
       checkmate::assert_flag(compile)
@@ -128,133 +116,124 @@ CmdStanModel <- R6::R6Class(
       }
       invisible(self)
     },
+
+    #' @description
+    #' File path to Stan program.
+    #' @return (string) The file path to the Stan program.
     stan_file = function() private$stan_file_,
+
+    #' @description
+    #' File path to executable.
+    #' @return (string) The file path to the compiled executable.
     exe_file = function() private$exe_file_,
+
+    #' @description
+    #' Stan code.
+    #' @return (character vector) The lines of the Stan program.
     code = function() {
       # Get Stan code as a string
       readLines(self$stan_file())
     },
+
+    #' @description
+    #' Print a readable version of the Stan program.
+    #' @return The `CmdStanModel` object, invisibly.
     print = function() {
       # Print readable version of Stan code
       cat(self$code(), sep = "\n")
+      invisible(self)
+    },
+
+    #' @description
+    #' Compile a Stan program.
+    #'
+    #' Leaving all arguments at their defaults should be fine for most users,
+    #' but optional arguments are provided to enable new features in CmdStan
+    #' (and the Stan Math library). See the CmdStan manual for more details.
+    #'
+    #' @param quiet (logical) Should the verbose output from CmdStan during
+    #'   compilation be suppressed? The default is `TRUE`, but if you encounter
+    #'   an error we recommend trying again with `quiet=FALSE` to see more of
+    #'   the output.
+    #' @param include_paths (character vector) Paths to directories where Stan
+    #'   should look for files specified in `#include` directives in the Stan
+    #'   program.
+    #' @param threads (logical) Should the model be compiled with [threading
+    #'   support](https://github.com/stan-dev/math/wiki/Threading-Support)? If
+    #'   `TRUE` then `-DSTAN_THREADS` is added to the compiler flags. See
+    #'   [set_num_threads()] to set the number of threads, which is read by
+    #'   CmdStan at run-time from an environment variable.
+    #' @param opencl (logical) Should the model be compiled with OpenCL support
+    #'   enabled?
+    #' @param opencl_platform_id (nonnegative integer) The ID of the OpenCL
+    #'   platform on which to run the compiled model.
+    #' @param opencl_device_id (nonnegative integer) The ID of the OpenCL device
+    #'   on the selected OpenCL platform on which to run the compiled model.
+    #' @param compiler_flags (character vector) Any additional compiler flags to
+    #'   be used when compiling the model.
+    #'
+    #' @return This method is called for its side effect of creating the
+    #'   executable and adding its path to the `CmdStanModel` object, but it
+    #'   also returns the `CmdStanModel` object invisibly.
+    #'
+    #' @examples
+    #' \dontrun{
+    #' stan_program <- file.path(cmdstan_path(), "examples/bernoulli/bernoulli.stan")
+    #' mod <- cmdstan_model(stan_program, compile = FALSE)
+    #' mod$compile()
+    #' mod$exe_file()
+    #' }
+    #'
+    compile = function(quiet = TRUE,
+                       include_paths = NULL,
+                       threads = FALSE,
+                       opencl = FALSE,
+                       opencl_platform_id = 0,
+                       opencl_device_id = 0,
+                       compiler_flags = NULL) {
+      exe <- strip_ext(self$stan_file())
+      make_local_changed <- set_make_local(threads,
+                                           opencl,
+                                           opencl_platform_id,
+                                           opencl_device_id,
+                                           compiler_flags)
+      # rebuild main.o and the model if there was a change in make/local
+      if (make_local_changed) {
+        message("A change in the compiler flags was found. Forcing recompilation.\n")
+        build_cleanup(exe, remove_main = TRUE)
+      }
+      # add path to the build tbb library to the PATH variable to avoid copying the dll file
+      if (cmdstan_version() >= "2.21" && os_is_windows()) {
+        path_to_TBB <- file.path(cmdstan_path(), "stan", "lib", "stan_math", "lib", "tbb")
+        Sys.setenv(PATH = paste0(path_to_TBB, ";", Sys.getenv("PATH")))
+      }
+
+      if (!is.null(include_paths)) {
+        checkmate::assert_directory_exists(include_paths, access = "r")
+        include_paths <- sapply(include_paths, absolute_path, USE.NAMES = FALSE)
+        include_paths <- paste0(include_paths, collapse = ",")
+        include_paths <- paste0("STANCFLAGS += --include_paths=", include_paths)
+      }
+
+      exe <- cmdstan_ext(exe) # adds .exe on Windows
+      run_log <- processx::run(
+        command = make_cmd(),
+        args = c(exe, include_paths),
+        wd = cmdstan_path(),
+        echo_cmd = !quiet,
+        echo = !quiet,
+        spinner = quiet,
+        stderr_line_callback = function(x,p) { if(quiet) message(x) },
+        error_on_status = TRUE
+      )
+
+      private$exe_file_ <- exe
       invisible(self)
     }
   )
 )
 
 # CmdStanModel methods -----------------------------------
-
-#' Compile a Stan program or get the Stan code
-#'
-#' @name model-method-compile
-#' @family CmdStanModel methods
-#'
-#' @description The `$compile()` method of a [`CmdStanModel`] object calls CmdStan
-#'   to translate a Stan program to C++ and then create a compiled executable.
-#'   The resulting files are placed in the same directory as the Stan program
-#'   associated with the `CmdStanModel` object. After compilation the path
-#'   to the executable can be accesed via the `$exe_file()` method.
-#'
-#' @section Usage:
-#'   ```
-#'   $compile(
-#'     quiet = TRUE,
-#'     include_paths = NULL,
-#'     threads = FALSE,
-#'     opencl = FALSE,
-#'     opencl_platform_id = 0,
-#'     opencl_device_id = 0,
-#'     compiler_flags = NULL
-#'   )
-#'   $exe_file()
-#'   ```
-#'
-#' @section Arguments:
-#'   Leaving all arguments at their defaults should be fine for most users, but
-#'   optional arguments are provided to enable new features in CmdStan (and the
-#'   Stan Math library). See the CmdStan manual for more details.
-#'   * `quiet`: (logical) Should the verbose output from CmdStan during
-#'     compilation be suppressed? The default is `TRUE`, but if you encounter an
-#'     error we recommend trying again with `quiet=FALSE` to see more of the
-#'     output.
-#'   * `include_paths`: (character vector) Paths to directories where Stan should
-#'     look for files specified in `#include` directives in the Stan program.
-#'   * `threads`: (logical) Should the model be compiled with
-#'     [threading support](https://github.com/stan-dev/math/wiki/Threading-Support)?
-#'     If `TRUE` then `-DSTAN_THREADS` is added to the compiler flags. See
-#'     [set_num_threads()] to set the number of threads, which is read by
-#'     CmdStan at run-time from an environment variable.
-#'   * `opencl`: (logical) Should the model be compiled with OpenCL support enabled?
-#'   * `opencl_platform_id`: (nonnegative integer) The ID of the OpenCL platform on which
-#'     to run the compiled model.
-#'   * `opencl_device_id`: (nonnegative integer) The ID of the OpenCL device on the selected
-#'     OpenCL platform on which to run the compiled model.
-#'   * `compiler_flags`: (character vector) Any additional compiler flags to be
-#'     used when compiling the model.
-#'
-#' @section Value: This method is called for its side effect of creating the
-#'   executable and adding its path to the [`CmdStanModel`] object, but it also
-#'   returns the [`CmdStanModel`] object invisibly.
-#'
-#' @template seealso-docs
-#'
-#' @examples
-#' \dontrun{
-#' stan_program <- file.path(cmdstan_path(), "examples/bernoulli/bernoulli.stan")
-#' mod <- cmdstan_model(stan_program, compile = FALSE)
-#' mod$compile()
-#' mod$exe_file()
-#' }
-#'
-NULL
-
-compile_method <- function(quiet = TRUE,
-                           include_paths = NULL,
-                           threads = FALSE,
-                           opencl = FALSE,
-                           opencl_platform_id = 0,
-                           opencl_device_id = 0,
-                           compiler_flags = NULL) {
-  exe <- strip_ext(self$stan_file())
-  make_local_changed <- set_make_local(threads,
-                                       opencl,
-                                       opencl_platform_id,
-                                       opencl_device_id,
-                                       compiler_flags)
-  # rebuild main.o and the model if there was a change in make/local
-  if (make_local_changed) {
-    message("A change in the compiler flags was found. Forcing recompilation.\n")
-    build_cleanup(exe, remove_main = TRUE)
-  }
-  # add path to the build tbb library to the PATH variable to avoid copying the dll file
-  if (cmdstan_version() >= "2.21" && os_is_windows()) {
-    path_to_TBB <- file.path(cmdstan_path(), "stan", "lib", "stan_math", "lib", "tbb")
-    Sys.setenv(PATH = paste0(path_to_TBB, ";", Sys.getenv("PATH")))
-  }
-
-  if (!is.null(include_paths)) {
-    checkmate::assert_directory_exists(include_paths, access = "r")
-    include_paths <- sapply(include_paths, absolute_path, USE.NAMES = FALSE)
-    include_paths <- paste0(include_paths, collapse = ",")
-    include_paths <- paste0("STANCFLAGS += --include_paths=", include_paths)
-  }
-
-  exe <- cmdstan_ext(exe) # adds .exe on Windows
-  run_log <- processx::run(
-    command = make_cmd(),
-    args = c(exe, include_paths),
-    wd = cmdstan_path(),
-    echo_cmd = !quiet,
-    echo = !quiet,
-    spinner = quiet,
-    stderr_line_callback = function(x,p) { if(quiet) message(x) },
-    error_on_status = TRUE
-  )
-
-  private$exe_file_ <- exe
-  invisible(self)
-}
-CmdStanModel$set("public", name = "compile", value = compile_method)
 
 
 #' Run Stan's MCMC algorithms
